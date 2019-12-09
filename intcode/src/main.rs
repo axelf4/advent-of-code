@@ -15,6 +15,7 @@ enum Opcode {
     JumpIfFalse = 6,
     LessThan = 7,
     Equals = 8,
+    RelativeBaseOffset = 9,
     Halt = 99,
 }
 
@@ -30,6 +31,7 @@ impl TryFrom<i64> for Opcode {
             6 => Ok(Opcode::JumpIfFalse),
             7 => Ok(Opcode::LessThan),
             8 => Ok(Opcode::Equals),
+            9 => Ok(Opcode::RelativeBaseOffset),
             99 => Ok(Opcode::Halt),
             _ => Err("Bad opcode"),
         }
@@ -40,6 +42,7 @@ impl TryFrom<i64> for Opcode {
 enum ParameterMode {
     Position = 0,
     Immediate = 1,
+    Relative = 2,
 }
 
 impl Default for ParameterMode {
@@ -54,6 +57,7 @@ impl TryFrom<i64> for ParameterMode {
         match value {
             0 => Ok(ParameterMode::Position),
             1 => Ok(ParameterMode::Immediate),
+            2 => Ok(ParameterMode::Relative),
             _ => Err("Bad parameter mode"),
         }
     }
@@ -89,17 +93,6 @@ fn parse_opcode_modes(
     Ok((modes, opcode))
 }
 
-struct Argument(usize, ParameterMode);
-
-impl Argument {
-    fn get_mut<'a>(&self, mem: &'a mut [i64]) -> &'a mut i64 {
-        match self.1 {
-            ParameterMode::Position => &mut mem[mem[self.0] as usize],
-            ParameterMode::Immediate => &mut mem[self.0],
-        }
-    }
-}
-
 trait NextTupleExt: Iterator {
     fn next_two(&mut self) -> (Self::Item, Self::Item) {
         (self.next().unwrap(), self.next().unwrap())
@@ -127,11 +120,16 @@ struct Vm {
     mem: Memory,
     /// Instruction pointer.
     ip: usize,
+    relative_base: i64,
 }
 
 impl Vm {
     fn from_mem(mem: Memory) -> Self {
-        Vm { mem, ip: 0 }
+        Vm {
+            mem,
+            ip: 0,
+            relative_base: 0,
+        }
     }
 }
 
@@ -143,26 +141,42 @@ impl FromStr for Vm {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+struct Argument(usize, ParameterMode);
+
+impl Argument {
+    fn get_mut<'a>(&self, vm: &'a mut Vm) -> &'a mut i64 {
+        let Vm {
+            ref mut mem,
+            relative_base,
+            ..
+        } = *vm;
+        let address = match self.1 {
+            ParameterMode::Position => mem[self.0] as usize,
+            ParameterMode::Immediate => self.0,
+            ParameterMode::Relative => (mem[self.0] + relative_base) as usize,
+        };
+        if address >= mem.len() {
+            mem.resize(address + 1, 0); // Fill in new memory with the value 0
+        }
+        &mut mem[address]
+    }
+}
+
 struct Interpreter<I>(Vm, I);
 
 impl<I: Iterator<Item = i64>> Iterator for Interpreter<I> {
     type Item = i64;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let Interpreter(
-            Vm {
-                ref mut mem,
-                ref mut ip,
-            },
-            ref mut input,
-        ) = *self;
+        let Interpreter(ref mut vm, ref mut input) = *self;
         loop {
-            let (modes, opcode) = parse_opcode_modes(mem[*ip]).unwrap();
-            *ip += 1;
+            let (modes, opcode) = parse_opcode_modes(vm.mem[vm.ip]).unwrap();
+            vm.ip += 1;
 
             let mut args = iter::from_fn(|| {
-                let arg = *ip;
-                *ip += 1;
+                let arg = vm.ip;
+                vm.ip += 1;
                 Some(arg)
             })
             .zip(modes)
@@ -171,33 +185,33 @@ impl<I: Iterator<Item = i64>> Iterator for Interpreter<I> {
             match opcode {
                 Opcode::Add => {
                     let (a, b, out) = args.next_three();
-                    *out.get_mut(mem) = *a.get_mut(mem) + *b.get_mut(mem);
+                    *out.get_mut(vm) = *a.get_mut(vm) + *b.get_mut(vm);
                 }
                 Opcode::Multiply => {
                     let (a, b, out) = args.next_three();
-                    *out.get_mut(mem) = *a.get_mut(mem) * *b.get_mut(mem);
+                    *out.get_mut(vm) = *a.get_mut(vm) * *b.get_mut(vm);
                 }
                 Opcode::Halt => break None,
                 Opcode::Input => {
                     let out = args.next().unwrap();
-                    assert_eq!(out.1, ParameterMode::Position);
-                    *out.get_mut(mem) = input.next().expect("No input");
+                    assert_ne!(out.1, ParameterMode::Immediate);
+                    *out.get_mut(vm) = input.next().expect("No input");
                 }
                 Opcode::JumpIfTrue => {
                     let (a, b) = args.next_two();
-                    if *a.get_mut(mem) != 0 {
-                        *ip = (*b.get_mut(mem)).try_into().unwrap();
+                    if *a.get_mut(vm) != 0 {
+                        vm.ip = (*b.get_mut(vm)).try_into().unwrap();
                     }
                 }
                 Opcode::JumpIfFalse => {
                     let (a, b) = args.next_two();
-                    if *a.get_mut(mem) == 0 {
-                        *ip = (*b.get_mut(mem)).try_into().unwrap();
+                    if *a.get_mut(vm) == 0 {
+                        vm.ip = (*b.get_mut(vm)).try_into().unwrap();
                     }
                 }
                 Opcode::LessThan => {
                     let (a, b, out) = args.next_three();
-                    *out.get_mut(mem) = if *a.get_mut(mem) < *b.get_mut(mem) {
+                    *out.get_mut(vm) = if *a.get_mut(vm) < *b.get_mut(vm) {
                         1
                     } else {
                         0
@@ -205,7 +219,7 @@ impl<I: Iterator<Item = i64>> Iterator for Interpreter<I> {
                 }
                 Opcode::Equals => {
                     let (a, b, out) = args.next_three();
-                    *out.get_mut(mem) = if *a.get_mut(mem) == *b.get_mut(mem) {
+                    *out.get_mut(vm) = if *a.get_mut(vm) == *b.get_mut(vm) {
                         1
                     } else {
                         0
@@ -213,7 +227,11 @@ impl<I: Iterator<Item = i64>> Iterator for Interpreter<I> {
                 }
                 Opcode::Output => {
                     let a = args.next().unwrap();
-                    break Some(*a.get_mut(mem));
+                    break Some(*a.get_mut(vm));
+                }
+                Opcode::RelativeBaseOffset => {
+                    let a = args.next().unwrap();
+                    vm.relative_base += *a.get_mut(vm);
                 }
             }
         }
@@ -338,6 +356,17 @@ fn main() -> std::io::Result<()> {
         amplification_circuit_two(&amp_program)
     );
 
+    // Day 9
+    let mem = mem_from_string(&fs::read_to_string("input9")?).unwrap();
+    println!(
+        "Output of BOOST program test mode: {:?}",
+        Interpreter(Vm::from_mem(mem.clone()), iter::once(1)).collect::<Vec<_>>()
+    );
+    println!(
+        "Output of BOOST program boost mode: {:?}",
+        Interpreter(Vm::from_mem(mem), iter::once(2)).collect::<Vec<_>>()
+    );
+
     Ok(())
 }
 
@@ -402,5 +431,32 @@ mod tests {
     fn test_amplification_circuit_two() {
         assert_eq!(amplification_circuit_two("3,26,1001,26,-4,26,3,27,1002,27,2,27,1,27,26,27,4,27,1001,28,-1,28,1005,28,6,99,0,0,5"), 139629729);
         assert_eq!(amplification_circuit_two("3,52,1001,52,-5,52,3,53,1,52,56,54,1007,54,5,55,1005,55,26,1001,54,-5,54,1105,1,12,1,53,54,53,1008,54,0,55,1001,55,1,55,2,53,55,53,4,53,1001,56,-1,56,1005,56,6,99,0,0,0,0,10"), 18216);
+    }
+
+    #[test]
+    fn test_relative_base() {
+        let mem =
+            mem_from_string("109,1,204,-1,1001,100,1,100,1008,100,16,101,1006,101,0,99").unwrap();
+        assert_eq!(
+            Interpreter(Vm::from_mem(mem.clone()), iter::empty()).collect::<Vec<_>>(),
+            mem
+        );
+
+        let output = Interpreter(
+            "1102,34915192,34915192,7,4,7,99,0".parse().unwrap(),
+            iter::empty(),
+        )
+        .next()
+        .unwrap();
+        assert_eq!(Digits(output).count(), 16);
+
+        let mem = mem_from_string("104,1125899906842624,99").unwrap();
+        let mid = mem[1];
+        assert_eq!(
+            Interpreter(Vm::from_mem(mem), iter::empty())
+                .next()
+                .unwrap(),
+            mid
+        );
     }
 }
