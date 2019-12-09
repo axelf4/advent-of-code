@@ -1,7 +1,9 @@
 use std::convert::{TryFrom, TryInto};
 use std::fs;
 use std::io;
+use std::iter::{self, FusedIterator};
 
+#[derive(Debug, Copy, Clone)]
 enum Opcode {
     Add = 1,
     Multiply = 2,
@@ -15,6 +17,7 @@ enum Opcode {
 }
 
 impl Opcode {
+    #[allow(dead_code)]
     fn arg_count(&self) -> usize {
         match self {
             Opcode::Add => 3,
@@ -60,106 +63,123 @@ impl Default for ParameterMode {
     }
 }
 
-impl TryFrom<char> for ParameterMode {
+impl TryFrom<i32> for ParameterMode {
     type Error = &'static str;
-    fn try_from(value: char) -> Result<Self, Self::Error> {
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
         match value {
-            '0' => Ok(ParameterMode::Position),
-            '1' => Ok(ParameterMode::Immediate),
+            0 => Ok(ParameterMode::Position),
+            1 => Ok(ParameterMode::Immediate),
             _ => Err("Bad parameter mode"),
         }
     }
 }
 
-struct ParameterModeList(Vec<ParameterMode>);
+struct Digits(i32);
 
-impl ParameterModeList {
-    fn get(&self, i: usize) -> ParameterMode {
-        self.0.get(i).copied().unwrap_or_default()
+impl Iterator for Digits {
+    type Item = i32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0 == 0 {
+            None
+        } else {
+            let digit = self.0 % 10;
+            self.0 /= 10;
+            Some(digit)
+        }
     }
 }
 
-fn parse_opcode_modes(value: i32) -> Result<(ParameterModeList, Opcode), &'static str> {
+impl FusedIterator for Digits {}
+
+fn parse_opcode_modes(value: i32) -> Result<(impl Iterator<Item = ParameterMode>, Opcode), &'static str> {
     let opcode = (value % 100).try_into()?;
-    let modes = ParameterModeList(
-        (value / 100)
-            .to_string()
-            .chars()
-            .rev()
+    let modes = Digits(value / 100)
             .map(TryInto::try_into)
-            .collect::<Result<_, _>>()?,
-    );
+            .map(Result::unwrap)
+            .chain(iter::repeat(Default::default()));
 
     Ok((modes, opcode))
 }
 
-fn arg<'a>(mem: &'a mut [i32], modes: &ParameterModeList, ip: usize, i: usize) -> &'a mut i32 {
-    let mode = modes.get(i);
-    match mode {
-        ParameterMode::Position => &mut mem[mem[ip + 1 + i] as usize],
-        ParameterMode::Immediate => &mut mem[ip + 1 + i],
+struct Argument(usize, ParameterMode);
+
+impl Argument {
+    fn get_mut<'a>(&self, mem: &'a mut [i32]) -> &'a mut i32 {
+        match self.1 {
+            ParameterMode::Position => &mut mem[mem[self.0] as usize],
+            ParameterMode::Immediate => &mut mem[self.0],
+        }
     }
 }
 
-fn interpret(mem: &mut [i32]) -> i32 {
-    let mut ip = 0; // Instruction pointer
-    loop {
-        let (modes, opcode) = parse_opcode_modes(mem[ip]).unwrap();
-        let save_ip = ip;
-        match opcode {
-            Opcode::Add => {
-                // a, b, out
-                let result = *arg(mem, &modes, ip, 0) + *arg(mem, &modes, ip, 1);
-                *arg(mem, &modes, ip, 2) = result;
-            }
-            Opcode::Multiply => {
-                // a, b, out
-                let result = *arg(mem, &modes, ip, 0) * *arg(mem, &modes, ip, 1);
-                *arg(mem, &modes, ip, 2) = result;
-            }
-            Opcode::Halt => break mem[0],
-            Opcode::Input => {
-                assert_eq!(modes.get(0), ParameterMode::Position);
-                let mut input_text = String::new();
-                io::stdin()
-                    .read_line(&mut input_text)
-                    .expect("Failed to read from stdin");
-                *arg(mem, &modes, ip, 0) =
-                    input_text.trim().parse().expect("Failed to parse input");
-            }
-            Opcode::JumpIfTrue => {
-                if *arg(mem, &modes, ip, 0) != 0 {
-                    ip = (*arg(mem, &modes, ip, 1)).try_into().unwrap();
-                }
-            }
-            Opcode::JumpIfFalse => {
-                if *arg(mem, &modes, ip, 0) == 0 {
-                    ip = (*arg(mem, &modes, ip, 1)).try_into().unwrap();
-                }
-            }
-            Opcode::LessThan => {
-                *arg(mem, &modes, ip, 2) = if *arg(mem, &modes, ip, 0) < *arg(mem, &modes, ip, 1) {
-                    1
-                } else {
-                    0
-                }
-            }
-            Opcode::Equals => {
-                *arg(mem, &modes, ip, 2) = if *arg(mem, &modes, ip, 0) == *arg(mem, &modes, ip, 1) {
-                    1
-                } else {
-                    0
-                }
-            }
-            Opcode::Output => {
-                println!("{}", *arg(mem, &modes, ip, 0));
-            }
-        }
-        // If instruction modified ip: Do not automatically increase
-        if ip == save_ip {
-            ip += 1 + opcode.arg_count();
-        }
+trait NextTupleExt: Iterator {
+    fn next_two(&mut self) -> (Self::Item, Self::Item) {
+        (self.next().unwrap(), self.next().unwrap())
     }
+
+    fn next_three(&mut self) -> (Self::Item, Self::Item, Self::Item) {
+        (self.next().unwrap(), self.next().unwrap(), self.next().unwrap())
+    }
+}
+
+impl<I: Iterator> NextTupleExt for I {}
+
+fn interpret<'a>(mem: &'a mut [i32], input: &'a mut impl Iterator<Item = i32>) -> impl Iterator<Item = i32> + 'a {
+    let mut ip = 0; // Instruction pointer
+    iter::from_fn(move || {
+        loop {
+            let (modes, opcode) = parse_opcode_modes(mem[ip]).unwrap();
+            ip += 1;
+
+            let mut args = iter::from_fn(|| {
+                let arg = ip;
+                ip += 1;
+                Some(arg)
+            }).zip(modes).map(|(arg, mode)| Argument(arg, mode));
+
+            match opcode {
+                Opcode::Add => {
+                    let (a, b, out) = args.next_three();
+                    *out.get_mut(mem) = *a.get_mut(mem) + *b.get_mut(mem);
+                }
+                Opcode::Multiply => {
+                    let (a, b, out) = args.next_three();
+                    *out.get_mut(mem) = *a.get_mut(mem) * *b.get_mut(mem);
+                }
+                Opcode::Halt => break None,
+                Opcode::Input => {
+                    let out = args.next().unwrap();
+                    assert_eq!(out.1, ParameterMode::Position);
+                    *out.get_mut(mem) = input.next().unwrap();
+                }
+                Opcode::JumpIfTrue => {
+                    let (a, b) = args.next_two();
+                    if *a.get_mut(mem) != 0 {
+                        ip = (*b.get_mut(mem)).try_into().unwrap();
+                    }
+                }
+                Opcode::JumpIfFalse => {
+                    let (a, b) = args.next_two();
+                    if *a.get_mut(mem) == 0 {
+                        ip = (*b.get_mut(mem)).try_into().unwrap();
+                    }
+                }
+                Opcode::LessThan => {
+                    let (a, b, out) = args.next_three();
+                    *out.get_mut(mem) = if *a.get_mut(mem) < *b.get_mut(mem) { 1 } else {0};
+                }
+                Opcode::Equals => {
+                    let (a, b, out) = args.next_three();
+                    *out.get_mut(mem) = if *a.get_mut(mem) == *b.get_mut(mem) { 1 } else {0};
+                }
+                Opcode::Output => {
+                    let a = args.next().unwrap();
+                    break Some(*a.get_mut(mem));
+                }
+            }
+        }
+    })
 }
 
 type Memory = Vec<i32>;
@@ -173,9 +193,21 @@ fn mem_from_string(input: &str) -> Memory {
         .unwrap()
 }
 
+fn input_iter() -> impl Iterator<Item = i32> {
+    iter::from_fn(|| {
+        let mut input_text = String::new();
+        io::stdin()
+            .read_line(&mut input_text)
+            .expect("Failed to read from stdin");
+        Some(input_text.trim().parse().expect("Failed to parse input"))
+    })
+}
+
 fn run_program(input: &str) -> Memory {
     let mut mem = mem_from_string(input);
-    interpret(&mut mem);
+    let mut input_iter = input_iter();
+    let output = interpret(&mut mem, &mut input_iter);
+    println!("Output is {:?}", output.collect::<Vec<_>>());
     mem
 }
 
@@ -190,7 +222,9 @@ fn main() -> std::io::Result<()> {
             let mut mem = mem.clone();
             mem[1] = noun;
             mem[2] = verb;
-            (noun, verb, interpret(&mut mem))
+            let mut input_iter = iter::empty();
+            for _ in interpret(&mut mem, &mut input_iter) {}
+            (noun, verb, mem[0])
         })
         .find(|&(_, _, output)| output == 19690720)
     {
@@ -200,11 +234,12 @@ fn main() -> std::io::Result<()> {
     mem[1] = 12;
     mem[2] = 2;
 
-    let output = interpret(&mut mem);
-    println!("The output is: {output}", output = output);
+    let mut input_iter = iter::empty();
+    let output = interpret(&mut mem, &mut input_iter);
+    println!("The output is: {output:?}", output = output.collect::<Vec<_>>());
 
-    println!("Running TEST");
-    run_program(&fs::read_to_string("input5")?);
+    // println!("Running TEST");
+    // run_program(&fs::read_to_string("input5")?);
 
     Ok(())
 }
@@ -218,4 +253,15 @@ fn test_small_programs() {
         run_program("1,1,1,4,99,5,6,0,99"),
         [30, 1, 1, 4, 2, 5, 6, 0, 99]
     );
+}
+
+#[test]
+fn test_parameter_modes() {
+    let mut input = iter::once(2);
+    assert_eq!(interpret(&mut mem_from_string("3,12,6,12,15,1,13,14,13,4,13,99,-1,0,1,9"),
+        &mut input).collect::<Vec<_>>(), [1]);
+
+    let mut input = iter::once(0);
+    assert_eq!(interpret(&mut mem_from_string("3,3,1105,-1,9,1101,0,0,12,4,12,99,1"),
+        &mut input).collect::<Vec<_>>(), [0]);
 }
