@@ -1,6 +1,15 @@
+import qualified Data.Map as Map
+import Data.Maybe (isJust)
+
 data Vector a =
   Vector a a a
   deriving (Show)
+
+getX (Vector x _ _) = x
+
+getY (Vector _ y _) = y
+
+getZ (Vector _ _ z) = z
 
 type IVec = Vector Int
 
@@ -30,7 +39,7 @@ applyGravity :: [Body] -> [Body]
 applyGravity bodies =
   map
     (\Body {pos = p, vel = v} ->
-       let nv = foldl (\acc x -> acc + signum (pos x - p)) v bodies
+       let nv = v + sum (map (\x -> signum (pos x - p)) bodies)
         in Body {pos = p, vel = nv})
     bodies
 
@@ -49,6 +58,17 @@ energy =
            kinetic = sum (abs v)
         in potential * kinetic)
 
+findCycle :: (IVec -> Int) -> [Body] -> Int
+findCycle memberFunc bodies =
+  let getSingle = map (\Body {pos = p, vel = v} -> (memberFunc p, memberFunc v))
+      go map n bodies =
+        let entry = getSingle bodies
+            (old, map') = Map.insertLookupWithKey (\_ a _ -> a) entry n map
+         in if isJust old
+              then n
+              else go map' (n + 1) (step bodies)
+   in go Map.empty 0 bodies
+
 printBodies :: [Body] -> IO [()]
 printBodies = sequence . (map (putStrLn . show))
 
@@ -62,7 +82,12 @@ main = do
   putStrLn "After 0 steps:"
   printBodies bodies
   let newBodies = (iterate step bodies) !! 1000
-  putStrLn "After 100 steps:"
+  putStrLn "After 1000 steps:"
   printBodies newBodies
-  let e = energy newBodies
-  putStrLn ("fin: " ++ (show e))
+  putStrLn ("Energy in system: " ++ (show $ energy newBodies))
+  let cycle =
+        foldr
+          (\a b -> a * b `div` (gcd a b))
+          1
+          (map (\memberFunc -> findCycle memberFunc bodies) [getX, getY, getZ])
+  putStrLn ("Steps til cycle: " ++ show cycle)
