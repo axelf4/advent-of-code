@@ -11,8 +11,7 @@ parseInput input = M.fromList <$> (parse rules "" input)
     bagAmount = do
       count <- read <$> many1 digit <* spaces
       bagColor <- color
-      string " bag"
-      optional (char 's')
+      string " bag" >> optional (char 's')
       return (count, bagColor)
     rule = do
       c <- color
