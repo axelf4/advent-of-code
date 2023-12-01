@@ -1,0 +1,23 @@
+AOC 2023 Day 1 using Emacs/Evil-mode Ex and keyboard macros:
+
+For part two, replace spelled out digits with their number counterparts:
+
+    %s/one\|two\|three\|four\|five\|six\|seven\|eight\|nine/\,(format "%d%s" (alist-get \& '(("one" . 1) ("two" . 2) ("three" . 3) ("four" . 4) ("five" . 5) ("six" . 6) ("seven" . 7) ("eight" . 8) ("nine" . 9)) nil nil #'string=) (substring \& 1))/g
+
+and repeat with @: until a fixpoint is reached.
+
+Remove everything but digits:
+
+    %s/[^0-9\n]//g
+
+Remove everything but first and last digit in each line:
+
+    %s/\([0-9]\).*\([0-9]\)/\1\2
+
+Duplicate single digits once:
+
+    %s/^[0-9]$/&&
+
+Sum up all the two-digit numbers using a macro:
+
+    gg i0 RET RET ESC qq "add gg "bC \C-r= ( + SPC \C-r a SPC \C-r b ) RET ESC '' q 999@q
