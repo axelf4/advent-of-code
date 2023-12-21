@@ -1,0 +1,13 @@
+package:
+  name: day20
+  dependencies:
+    - console
+    - effect
+    - node-fs
+    - ordered-collections
+    - prelude
+    - strings
+workspace:
+  package_set:
+    registry: 47.7.1
+  extra_packages: {}
